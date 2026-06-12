@@ -96,7 +96,7 @@ if t % 1000 == 0:
     print(T_current[0], np.min(rho_current))
 
 
-#Verification Plotting
+#------Verification Plotting------#
 
 x_axis = np.linspace(0, L*1000, N)
 
