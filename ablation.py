@@ -14,7 +14,7 @@ rho_char = 800 #kg/m^3
 k_virgin = 0.30   #W/m-K
 k_char = 0.15 #W/m-K, PLACEHOLDER I DONT KNOW WHAT THIS IS
 cp_virgin = 1500 #J/kg-K
-alpha = k_virgin / (rho_virgin * cp_virgin) #Thermal diffusivity
+cp_char = 1150 #J/kg-K, PLACEHOLDER I DONT KNOW WHAT THIS IS
 burn_time = 8 #seconds, approximate burn time of engine
 
 #Arrenhius Parameters for Charring Rate
@@ -55,32 +55,49 @@ def drho_dt(rho, T):
 
     return rhodot
 
-def get_nodal_properties(rho_current, rho_virgin, rho_char, k_virgin, cp_virgin):
+def get_nodal_properties(rho_node):
 
-    gamma = (rho_virgin - rho_current) / (rho_virgin - rho_char)
+    gamma = (rho_virgin - rho_node) / (rho_virgin - rho_char)
+
+    gamma = np.clip(gamma, 0, 1) #0 means virgin, 1 means charred
 
     k_node = k_virgin * (1-gamma) + gamma * k_char
+
+    cp_node = cp_virgin * (1-gamma) + gamma * cp_char
+
+    alpha_node = k_node / (cp_node * rho_node)
 
     return k_node, cp_node, alpha_node
 
 #Main Time Loop
 for t in range(time_steps):
         
+    #Get the nodal properties at the inner wall
+    k_surface, cp_surface, alpha_surface = get_nodal_properties(rho_current[0])
+
     #Calculate the heat coming in from the hot wall using RPA Convection Coefficient Data
-    T_next[0] = T_current[0] + ((2*dt)/(rho_virgin*cp_virgin*dx)) * (hg * (T_gas - T_current[0]) - k_virgin * (T_current[0] - T_current[1]) / dx)
+    T_next[0] = T_current[0] + ((2*dt)/(rho_current[0]*cp_surface*dx)) * (hg * (T_gas - T_current[0]) - k_surface * (T_current[0] - T_current[1]) / dx)
 
     rho_new = rho_current[0] + drho_dt(rho_current[0], T_current[0]) * dt
     rho_next[0] = max(rho_char, rho_new)
 
     for i in range(1, N-1):
+
+        #Get the nodal properties of the current node
+        k_node, cp_node, alpha_node = get_nodal_properties(rho_current[i])
+
         #Calculate the temperature at the next node for nodes 2-98
-        T_next[i] = T_current[i] + alpha * dt * (T_current[i+1] - 2*T_current[i] + T_current[i-1]) / dx**2
+        T_next[i] = T_current[i] + alpha_node * dt * (T_current[i+1] - 2*T_current[i] + T_current[i-1]) / dx**2
 
         rho_new = (rho_current[i] + drho_dt(rho_current[i], T_current[i]) * dt)
         rho_next[i] = max(rho_char, rho_new)
 
+
+    #Get the nodal properties at the outer wall
+    k_outer, cp_outer, alpha_outer = get_nodal_properties(rho_current[-1])
+
     #Calculate the temp at the outer wall which is conducting heat to the outer air
-    T_next[-1] = T_current[-1] + (2*dt/(rho_virgin*cp_virgin*dx)) * (k_virgin * (T_current[-2] - T_current[-1]) / dx)
+    T_next[-1] = T_current[-1] + (2*dt/(rho_current[-1]*cp_outer*dx)) * (k_outer * (T_current[-2] - T_current[-1]) / dx)
 
     rho_new = (rho_current[-1] + drho_dt(rho_current[-1], T_current[-1]) * dt)
     rho_next[-1] = max(rho_char, rho_new)
