@@ -16,6 +16,7 @@ k_char = 0.15 #W/m-K, PLACEHOLDER I DONT KNOW WHAT THIS IS
 cp_virgin = 1500 #J/kg-K
 cp_char = 1150 #J/kg-K, PLACEHOLDER I DONT KNOW WHAT THIS IS
 burn_time = 8 #seconds, approximate burn time of engine
+delta_h_pyro = 5e5 #J/kg, heat of pyrolysis, PLACEHOLDER I DONT KNOW WHAT THIS IS
 
 #Arrenhius Parameters for Charring Rate
 B = 1e6 #PLACEHOLDER
@@ -43,6 +44,7 @@ rho_next = np.zeros(N)
 #Boundary Conditions
 T_gas = 2494 #K, Adiabatic wall temperature...due to boundary layer effects, the temperature responsible for conduction is only a fraction of the total stagnation temperature (RPA)
 T_current[-1] = 300 #K, ambient temperature at the outer surface
+max_rhodot = 0
 
 #Arrehenius Function
 def drho_dt(rho, T):
@@ -74,32 +76,42 @@ for t in range(time_steps):
         
     #Get the nodal properties at the inner wall
     k_surface, cp_surface, alpha_surface = get_nodal_properties(rho_current[0])
+    rhodot_surface = drho_dt(rho_current[0], T_current[0])
+    pyro_sink_surface = (delta_h_pyro * abs(rhodot_surface)) / (rho_current[0] * cp_surface)
 
     #Calculate the heat coming in from the hot wall using RPA Convection Coefficient Data
-    T_next[0] = T_current[0] + ((2*dt)/(rho_current[0]*cp_surface*dx)) * (hg * (T_gas - T_current[0]) - k_surface * (T_current[0] - T_current[1]) / dx)
+    T_next[0] = T_current[0] + ((2)/(rho_current[0]*cp_surface*dx)) * (q_rad + hg * (T_gas - T_current[0]) - k_surface * (T_current[0] - T_current[1]) / dx - pyro_sink_surface) * dt
 
-    rho_new = rho_current[0] + drho_dt(rho_current[0], T_current[0]) * dt
+    rho_new = rho_current[0] + rhodot_surface * dt
     rho_next[0] = max(rho_char, rho_new)
+
+    max_rhodot = max(max_rhodot, abs(rhodot_surface))
 
     for i in range(1, N-1):
 
         #Get the nodal properties of the current node
         k_node, cp_node, alpha_node = get_nodal_properties(rho_current[i])
+        rhodot = drho_dt(rho_current[i], T_current[i])
+        pyro_sink = (delta_h_pyro * abs(rhodot)) / (rho_current[i] * cp_node)
 
         #Calculate the temperature at the next node for nodes 2-98
-        T_next[i] = T_current[i] + alpha_node * dt * (T_current[i+1] - 2*T_current[i] + T_current[i-1]) / dx**2
+        T_next[i] = T_current[i] + (alpha_node * (T_current[i+1] - 2*T_current[i] + T_current[i-1]) / dx**2 - pyro_sink) * dt
 
-        rho_new = (rho_current[i] + drho_dt(rho_current[i], T_current[i]) * dt)
+        max_rhodot = max(max_rhodot, abs(rhodot))
+        rho_new = (rho_current[i] + rhodot * dt)
         rho_next[i] = max(rho_char, rho_new)
 
 
     #Get the nodal properties at the outer wall
     k_outer, cp_outer, alpha_outer = get_nodal_properties(rho_current[-1])
+    rhodot_outer = drho_dt(rho_current[-1], T_current[-1])
+    pyro_sink_outer = (delta_h_pyro * abs(rhodot_outer)) / (rho_current[-1] * cp_outer)
 
     #Calculate the temp at the outer wall which is conducting heat to the outer air
-    T_next[-1] = T_current[-1] + (2*dt/(rho_current[-1]*cp_outer*dx)) * (k_outer * (T_current[-2] - T_current[-1]) / dx)
+    T_next[-1] = T_current[-1] + (2/(rho_current[-1]*cp_outer*dx)) * (k_outer * (T_current[-2] - T_current[-1]) / dx - pyro_sink_outer) * dt
 
-    rho_new = (rho_current[-1] + drho_dt(rho_current[-1], T_current[-1]) * dt)
+    max_rhodot = max(max_rhodot, abs(rhodot_outer))
+    rho_new = (rho_current[-1] + rhodot_outer * dt)
     rho_next[-1] = max(rho_char, rho_new)
 
     #Update arrays
@@ -108,6 +120,7 @@ for t in range(time_steps):
 
 print("Inner wall temp:", T_current[0], "K")
 print("Minimum density:", np.min(rho_current), "kg/m^3")
+print("Maximum pyrolysis rate:", max_rhodot)
 
 if t % 1000 == 0:
     print(T_current[0], np.min(rho_current))
@@ -115,8 +128,17 @@ if t % 1000 == 0:
 
 #------Verification Plotting------#
 
-x_axis = np.linspace(0, L*1000, N)
+rhodot_profile = np.zeros(N)
 
+for i in range(N):
+    rhodot_profile[i] = abs(
+    drho_dt(rho_current[i], T_current[i])
+    )
+
+gamma_profile = (rho_virgin - rho_current) / ( rho_virgin - rho_char)
+gamma_profile = np.clip(gamma_profile, 0, 1)
+
+x_axis = np.linspace(0, L*1000, N)
 fig, ax1 = plt.subplots(figsize=(10,5))
 
 # Temperature plot
@@ -132,12 +154,29 @@ ax2 = ax1.twinx()
 ax2.plot(x_axis, rho_current, linewidth=2, linestyle='--', label="Density")
 ax2.set_ylabel("Density (kg/m^3)")
 
-# Optional combined legend
+#combined legend
 lines1, labels1 = ax1.get_legend_handles_labels()
 lines2, labels2 = ax2.get_legend_handles_labels()
 ax1.legend(lines1 + lines2, labels1 + labels2, loc='best')
 
 plt.title("Temperature and Density Profiles")
+plt.show()
+
+# Plot the char fraction and pyrolysis rate profiles
+plt.figure(figsize=(10,5))
+plt.plot(x_axis, gamma_profile, linewidth=2)
+plt.xlabel("Distance from inner wall (mm)")
+plt.ylabel("Char Fraction")
+plt.title("Char Fraction Profile")
+plt.grid()
+
+plt.figure(figsize=(10,5))
+plt.plot(x_axis, rhodot_profile, linewidth=2)
+plt.xlabel("Distance from inner wall (mm)")
+plt.ylabel("Pyrolysis Rate (kg/m³-s)")
+plt.title("Pyrolysis Rate Profile")
+plt.grid()
+
 plt.show()
 
 
