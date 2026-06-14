@@ -44,7 +44,6 @@ rho_next = np.zeros(N)
 #Boundary Conditions
 T_gas = 2494 #K, Adiabatic wall temperature...due to boundary layer effects, the temperature responsible for conduction is only a fraction of the total stagnation temperature (RPA)
 T_current[-1] = 300 #K, ambient temperature at the outer surface
-max_rhodot = 0
 
 #Arrehenius Function
 def drho_dt(rho, T):
@@ -85,19 +84,27 @@ for t in range(time_steps):
     rho_new = rho_current[0] + rhodot_surface * dt
     rho_next[0] = max(rho_char, rho_new)
 
-    max_rhodot = max(max_rhodot, abs(rhodot_surface))
-
     for i in range(1, N-1):
 
         #Get the nodal properties of the current node
         k_node, cp_node, alpha_node = get_nodal_properties(rho_current[i])
+
+        k_im1, _, _ = get_nodal_properties(rho_current[i-1])
+        k_ip1, _, _ = get_nodal_properties(rho_current[i+1])
+
+        k_left = 0.5 * (k_node + k_im1)
+        k_right = 0.5 * (k_node + k_ip1)
+
+        conduction_term = (k_right * (T_current[i+1] - T_current[i]) - k_left * (T_current[i] - T_current[i-1])) / dx**2
+
         rhodot = drho_dt(rho_current[i], T_current[i])
+
         pyro_sink = (delta_h_pyro * abs(rhodot)) / (rho_current[i] * cp_node)
 
         #Calculate the temperature at the next node for nodes 2-98
-        T_next[i] = T_current[i] + (alpha_node * (T_current[i+1] - 2*T_current[i] + T_current[i-1]) / dx**2 - pyro_sink) * dt
+        T_dot = (conduction_term / (rho_current[i] * cp_node) - pyro_sink)
+        T_next[i] = T_current[i] + T_dot * dt
 
-        max_rhodot = max(max_rhodot, abs(rhodot))
         rho_new = (rho_current[i] + rhodot * dt)
         rho_next[i] = max(rho_char, rho_new)
 
@@ -110,7 +117,6 @@ for t in range(time_steps):
     #Calculate the temp at the outer wall which is conducting heat to the outer air
     T_next[-1] = T_current[-1] + (2/(rho_current[-1]*cp_outer*dx)) * (k_outer * (T_current[-2] - T_current[-1]) / dx - pyro_sink_outer) * dt
 
-    max_rhodot = max(max_rhodot, abs(rhodot_outer))
     rho_new = (rho_current[-1] + rhodot_outer * dt)
     rho_next[-1] = max(rho_char, rho_new)
 
@@ -120,7 +126,6 @@ for t in range(time_steps):
 
 print("Inner wall temp:", T_current[0], "K")
 print("Minimum density:", np.min(rho_current), "kg/m^3")
-print("Maximum pyrolysis rate:", max_rhodot)
 
 if t % 1000 == 0:
     print(T_current[0], np.min(rho_current))
