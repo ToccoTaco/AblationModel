@@ -4,10 +4,6 @@ import matplotlib.pyplot as plt
 #Author: Luke Tocco
 #Date: 6/17/2024
 
-#This code will determine the thickness needed for a thermal ablative subject to certain temperature conditions inside the Genesis rocket engine. It uses 1D Charring Material Ablative logic.
-#The wall is broken up into discrete nodes(i=1,2,3,...N) and the temperature at each node is calculated based on the heat flux from the hot gases and the thermal properties of the material.
-#Boundary conditions are supplied by data from RPA and known values.
-
 #Material Constants (For Grade CE Canvas Phenolic)
 rho_virgin = 1.38*10**3 #kg/m^3
 rho_char = 800 #kg/m^3 
