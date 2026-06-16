@@ -1,415 +1,527 @@
 """
-ablation_animation.py  –  Engine Genesis: Real-Time Ablation Visualiser
-========================================================================
-Standalone animation of the 1-D transient ablation process.
-Runs the full simulation internally (no dependency on ablation.py) then
-plays back a high-fidelity animated cross-section with:
-  • Eroding left boundary (Landau grid compression)
-  • True-colour heat map (300 K → 2000+ K)
-  • Density / char-fraction profile
-  • Pyrolysis gas velocity (outgassing flux) overlay
-  • Live telemetry panel
+ablation_animation.py  -  Engine Genesis: Wall Ablation Visualiser
+======================================================================
+Usage:
+  python ablation_animation.py             -> interactive window
+  python ablation_animation.py --save      -> 60fps MP4 to OUTPUT_PATH
 """
 
-import numpy as np
+# THIS FILE WAS WRITTEN BY CLAUDE CODE, LPTOC's PHYSICS WAS PASSED INTO THE MODEL AND TOLD TO CREATE A VISUALISATION OF THE SIMULATION RESULTS. 
+# THE SIMULATION CODE ITSELF IS IN ABLATION.PY
+
+import sys, numpy as np, warnings
+warnings.filterwarnings("ignore")
+
 import matplotlib
 try:
-    matplotlib.use("TkAgg")   # interactive on most desktops
-    import tkinter  # noqa: probe whether Tk is available
+    matplotlib.use("TkAgg"); import tkinter
 except Exception:
-    matplotlib.use("Agg")     # headless fallback — saves to file
+    matplotlib.use("Agg")
+    if "--save" not in sys.argv: sys.argv.append("--save")
+
+if "--save" in sys.argv:
+    matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import matplotlib.colors as mcolors
-from matplotlib.collections import LineCollection
-import warnings
-warnings.filterwarnings("ignore")
+import matplotlib.patches as mpatches
+import matplotlib.patheffects as pe
+import matplotlib.ticker as ticker
 
-# ═══════════════════════════════════════════════════════════
-# 1.  SIMULATION  (identical physics to patched ablation.py)
-# ═══════════════════════════════════════════════════════════
-print("Running pre-simulation …", flush=True)
+# ── User-configurable paths (edit these for your machine) ────────────────────
+OUTPUT_PATH = "C:\\Users\\lptoc\\Downloads\\engine_genesis_ablation_v4.mp4"
+matplotlib.rcParams['animation.ffmpeg_path'] = (
+    r'C:\Users\lptoc\Downloads\ffmpeg-master-latest-win64-gpl'
+    r'\ffmpeg-master-latest-win64-gpl\bin\ffmpeg.exe'
+)
+SAVE_VIDEO = "--save" in sys.argv
 
-# Material constants
-rho_virgin  = 1.38e3;  rho_char = 800.0
-k_virgin    = 0.30;    k_char   = 1.05
-cp_virgin   = 1500.0;  cp_char  = 1400.0
-delta_h_pyro     = 2.3e6
-cp_pyrolysis_gas = 3200.0
-B_prime_c   = 0.08
+# ═══════════════════════════════════════════════════════════════════════════════
+# 1.  SIMULATION
+# ═══════════════════════════════════════════════════════════════════════════════
+print("[ Engine Genesis ] Running simulation...", flush=True)
 
-B = 3.0e9;  E = 1.4e5;  m_ord = 2;  R = 8.314
-L_initial   = 0.0127
-N = 300;  dt = 0.0005;  burn_time = 8.0
-time_steps  = int(burn_time / dt)
+rho_virgin=1.38e3; rho_char=800.0
+delta_h_pyro=2.3e6; cp_pyrolysis_gas=3200.0; B_prime_c=0.08
+B=3.0e9; E=1.4e5; m_ord=2; R=8.314
+L_initial=0.0127; N=300; dt=0.0005; burn_time=8.0
+time_steps=int(burn_time/dt)
+hg_unblown=1346.9; q_rad=449.8813e3; T_gas=2494.0
+epsilon=0.85; sigma=5.67e-8
 
-hg_unblown = 1346.9;  q_rad = 449.8813e3;  T_gas = 2494.0
-epsilon = 0.85;  sigma = 5.67e-8
+# T-dependent properties (Phase 1 upgrade)
+k_v_T  =np.array([300,  400,  500,  600,  700,  800 ])
+k_v_val=np.array([.290, .310, .330, .350, .370, .390])
+k_c_T  =np.array([700,  900, 1100, 1400, 1700, 2000, 2500])
+k_c_val=np.array([.680, .820, .980,1.200,1.500,1.850,2.600])
+cp_v_T  =np.array([300, 373, 473, 573, 673, 800])
+cp_v_val=np.array([1300,1420,1560,1720,1870,1950])
+cp_c_T  =np.array([700, 900,1100,1400,1700,2000,2500])
+cp_c_val=np.array([900, 980,1060,1190,1340,1490,1700])
 
-def drho_dt(rho, T, dt_):
-    if rho <= rho_char: return 0.0
-    rt = ((rho - rho_char) / rho_virgin) ** m_ord
-    rdot = -B * np.exp(-E / (R * T)) * rho_virgin * rt
-    return max(rdot, -(rho - rho_char) / dt_)
+def drho_dt(rho,T,dt_):
+    if rho<=rho_char: return 0.
+    rt=((rho-rho_char)/rho_virgin)**m_ord
+    return max(-B*np.exp(-E/(R*T))*rho_virgin*rt,-(rho-rho_char)/dt_)
 
-def nodal_props(rho_n):
-    g = np.clip((rho_virgin - rho_n) / (rho_virgin - rho_char), 0., 1.)
-    k  = k_virgin  * (1-g) + g * k_char
-    cp = cp_virgin * (1-g) + g * cp_char
-    return k, cp
+def nodal_props(rho_n,T_n):
+    g=np.clip((rho_virgin-rho_n)/(rho_virgin-rho_char),0.,1.)
+    kv=np.interp(T_n,k_v_T,k_v_val); kc=np.interp(T_n,k_c_T,k_c_val)
+    cv=np.interp(T_n,cp_v_T,cp_v_val); cc=np.interp(T_n,cp_c_T,cp_c_val)
+    return kv*(1-g)+kc*g, cv*(1-g)+cc*g
 
-# ── Simulation storage (sub-sampled every 50 steps ≈ 160 frames @ 8 s) ──────
-STRIDE = 50
-n_frames = time_steps // STRIDE
+STRIDE=50; n_frames=time_steps//STRIDE
+T_hist=np.zeros((n_frames,N)); rho_hist=np.zeros((n_frames,N))
+mdot_g_hist=np.zeros((n_frames,N)); L_hist=np.zeros(n_frames)
+rec_hist=np.zeros(n_frames); mdot_hist=np.zeros(n_frames)
+Tw_hist=np.zeros(n_frames); hgb_hist=np.zeros(n_frames); Bc_hist=np.zeros(n_frames)
 
-T_hist   = np.zeros((n_frames, N))
-rho_hist = np.zeros((n_frames, N))
-mdot_g_hist  = np.zeros((n_frames, N))
-L_hist   = np.zeros(n_frames)
-recession_hist = np.zeros(n_frames)
-mdot_blowing_hist = np.zeros(n_frames)
-Tw_hist  = np.zeros(n_frames)
-
-T_cur   = np.ones(N) * 300.0
-rho_cur = np.ones(N) * rho_virgin
-T_nxt   = np.zeros(N)
-rho_nxt = np.zeros(N)
-rdot    = np.zeros(N)
-recession_depth = 0.0
-frame_idx = 0
+T_cur=np.ones(N)*300.; rho_cur=np.ones(N)*rho_virgin
+T_nxt=np.zeros(N); rho_nxt=np.zeros(N); rdot=np.zeros(N)
+rec_depth=0.; fi=0
 
 for t in range(time_steps):
-    L_cur  = L_initial - recession_depth
-    dx     = L_cur / (N - 1)
+    L_cur=L_initial-rec_depth; dx=L_cur/(N-1)
+    for i in range(N): rdot[i]=drho_dt(rho_cur[i],T_cur[i],dt)
+    mg=np.zeros(N); mg[-1]=abs(rdot[-1])*dx
+    for i in range(N-2,-1,-1): mg[i]=mg[i+1]+abs(rdot[i])*dx
+    mt=mg[0]
+    ks,cps=nodal_props(rho_cur[0],T_cur[0])
+    mc=(hg_unblown/cp_pyrolysis_gas)*B_prime_c
+    rr=mc/rho_char; rec_depth+=rr*dt; mt+=mc
+    Bc=(mt*cp_pyrolysis_gas)/hg_unblown
+    hgb=hg_unblown*(np.log(1+Bc)/Bc) if Bc>0.001 else hg_unblown
+    qr=epsilon*sigma*T_cur[0]**4
+    pvs=delta_h_pyro*abs(rdot[0]); cs=ks*(T_cur[0]-T_cur[1])/dx
+    dT0=(2./(rho_cur[0]*cps*dx))*(q_rad+hgb*(T_gas-T_cur[0])-qr-cs-pvs*dx/2.)*dt
+    T_nxt[0]=max(300.,T_cur[0]+dT0); rho_nxt[0]=max(rho_char,rho_cur[0]+rdot[0]*dt)
+    for i in range(1,N-1):
+        kn,cpn=nodal_props(rho_cur[i],T_cur[i])
+        kim,_=nodal_props(rho_cur[i-1],T_cur[i-1]); kip,_=nodal_props(rho_cur[i+1],T_cur[i+1])
+        kl=.5*(kn+kim); kr=.5*(kn+kip)
+        cond=(kr*(T_cur[i+1]-T_cur[i])-kl*(T_cur[i]-T_cur[i-1]))/dx**2
+        pyro=(delta_h_pyro*abs(rdot[i]))/(rho_cur[i]*cpn)
+        adv=(mg[i]*cp_pyrolysis_gas*(T_cur[i+1]-T_cur[i])/dx)/(rho_cur[i]*cpn)
+        eta=i/(N-1); dTdx=(T_cur[i+1]-T_cur[i-1])/(2*dx); gv=rr*(1-eta)*dTdx
+        T_nxt[i]=max(300.,T_cur[i]+(cond/(rho_cur[i]*cpn)-pyro+adv+gv)*dt)
+        rho_nxt[i]=max(rho_char,rho_cur[i]+rdot[i]*dt)
+    ko,cpo=nodal_props(rho_cur[-1],T_cur[-1]); pvo=delta_h_pyro*abs(rdot[-1])
+    dTo=(2./(rho_cur[-1]*cpo*dx))*(ko*(T_cur[-2]-T_cur[-1])/dx-pvo*dx/2.)*dt
+    T_nxt[-1]=max(300.,T_cur[-1]+dTo); rho_nxt[-1]=max(rho_char,rho_cur[-1]+rdot[-1]*dt)
+    T_cur[:]=T_nxt; rho_cur[:]=rho_nxt
+    if t%STRIDE==0 and fi<n_frames:
+        T_hist[fi]=T_cur.copy(); rho_hist[fi]=rho_cur.copy()
+        mdot_g_hist[fi]=mg.copy(); L_hist[fi]=L_initial-rec_depth
+        rec_hist[fi]=rec_depth; mdot_hist[fi]=mt
+        Tw_hist[fi]=T_cur[0]; hgb_hist[fi]=hgb; Bc_hist[fi]=Bc; fi+=1
 
-    for i in range(N):
-        rdot[i] = drho_dt(rho_cur[i], T_cur[i], dt)
+print(f"[ Engine Genesis ] Done. {fi} frames.", flush=True)
 
-    mdot_g = np.zeros(N)
-    mdot_g[-1] = abs(rdot[-1]) * dx
-    for i in range(N-2, -1, -1):
-        mdot_g[i] = mdot_g[i+1] + abs(rdot[i]) * dx
-    mdot_total = mdot_g[0]
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2.  COLOUR MAPS
+# ═══════════════════════════════════════════════════════════════════════════════
+bb_ramp={"red":  [(0.,.02,.02),(.20,.08,.08),(.45,.75,.75),(.72,1.,1.),(1.,1.,1.)],
+         "green":[(0.,.02,.02),(.20,.02,.02),(.45,.15,.15),(.72,.50,.50),(1.,.96,.96)],
+         "blue": [(0.,.18,.18),(.20,.42,.42),(.45,.04,.04),(.72,.02,.02),(1.,.88,.88)]}
+cmap_bb  = mcolors.LinearSegmentedColormap("bb",  bb_ramp,  N=512)
+char_ramp={"red":  [(0.,.97,.97),(.35,.88,.88),(.65,.50,.50),(1.,.12,.12)],
+           "green":[(0.,.95,.95),(.35,.62,.62),(.65,.28,.28),(1.,.06,.06)],
+           "blue": [(0.,.90,.90),(.35,.18,.18),(.65,.08,.08),(1.,.04,.04)]}
+cmap_char= mcolors.LinearSegmentedColormap("char",char_ramp,N=256)
+norm_T   = mcolors.Normalize(vmin=300.,vmax=2400.)
 
-    k_s, cp_s = nodal_props(rho_cur[0])
-    mdot_c    = (hg_unblown / cp_pyrolysis_gas) * B_prime_c
-    rec_rate  = mdot_c / rho_char
-    recession_depth += rec_rate * dt
-    mdot_total += mdot_c
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3.  FIGURE  — dark cinematic canvas
+# ═══════════════════════════════════════════════════════════════════════════════
+BG="#06060e"; PANEL="#0b0b18"; EDGE="#252540"
+fig=plt.figure(figsize=(20,11),facecolor=BG)
+fig.patch.set_facecolor(BG)
 
-    Bc = (mdot_total * cp_pyrolysis_gas) / hg_unblown
-    hg_bl = hg_unblown * (np.log(1+Bc)/Bc) if Bc > 0.001 else hg_unblown
-    q_rerad = epsilon * sigma * T_cur[0]**4
+# Grid: main wall panel left, three right panels stacked
+ax_wall = fig.add_axes([0.01, 0.08, 0.62, 0.88])   # big wall cross-section
+ax_eng  = fig.add_axes([0.66, 0.70, 0.32, 0.26])   # mini engine schematic
+ax_tw   = fig.add_axes([0.66, 0.40, 0.32, 0.26])   # T_wall history
+ax_rec  = fig.add_axes([0.66, 0.08, 0.32, 0.26])   # recession + blowing
 
-    pyro_vol_s = delta_h_pyro * abs(rdot[0])
-    cond_s     = k_s * (T_cur[0] - T_cur[1]) / dx
-    dT0 = (2.0/(rho_cur[0]*cp_s*dx)) * (
-        q_rad + hg_bl*(T_gas - T_cur[0]) - q_rerad - cond_s
-        - pyro_vol_s * dx / 2.0) * dt
-    T_nxt[0] = max(300., T_cur[0] + dT0)
-    rho_nxt[0] = max(rho_char, rho_cur[0] + rdot[0]*dt)
+for ax in [ax_wall,ax_eng,ax_tw,ax_rec]:
+    ax.set_facecolor(PANEL)
+    for sp in ax.spines.values(): sp.set_edgecolor(EDGE)
+    ax.tick_params(colors="#7070a0",labelsize=8)
+    ax.xaxis.label.set_color("#7070a0"); ax.yaxis.label.set_color("#7070a0")
+    ax.title.set_color("#b0a8d0")
 
-    for i in range(1, N-1):
-        k_n, cp_n = nodal_props(rho_cur[i])
-        k_im1, _  = nodal_props(rho_cur[i-1])
-        k_ip1, _  = nodal_props(rho_cur[i+1])
-        kl = 0.5*(k_n + k_im1);  kr = 0.5*(k_n + k_ip1)
-        cond = (kr*(T_cur[i+1]-T_cur[i]) - kl*(T_cur[i]-T_cur[i-1])) / dx**2
-        pyro = (delta_h_pyro * abs(rdot[i])) / (rho_cur[i] * cp_n)
-        adv  = (mdot_g[i]*cp_pyrolysis_gas*(T_cur[i+1]-T_cur[i])/dx) / (rho_cur[i]*cp_n)
-        eta  = i / (N-1)
-        dTdx = (T_cur[i+1]-T_cur[i-1])/(2*dx)
-        gv   = rec_rate * (1-eta) * dTdx
-        T_nxt[i] = max(300., T_cur[i] + (cond/(rho_cur[i]*cp_n) - pyro + adv + gv)*dt)
-        rho_nxt[i] = max(rho_char, rho_cur[i] + rdot[i]*dt)
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4.  MAIN WALL PANEL
+#
+#  We draw the wall as a TALL vertical rectangle in (depth_mm, height) space.
+#  depth_mm: 0 = hot face (left), L_initial*1000 = cold back face (right)
+#  height:   0 to 1  (normalised, no physical meaning — just for visual weight)
+#
+#  The recession is EXAGGERATED 10x so you can actually see it move.
+#  A scale bar and callout note make the exaggeration explicit.
+# ═══════════════════════════════════════════════════════════════════════════════
+EXAG = 10.0          # visual exaggeration factor for recession
+WALL_MM = L_initial * 1000.   # 12.7 mm
+H = 1.0              # wall height in normalised units
 
-    k_o, cp_o = nodal_props(rho_cur[-1])
-    pyro_vol_o = delta_h_pyro * abs(rdot[-1])
-    dT_o = (2.0/(rho_cur[-1]*cp_o*dx)) * (
-        k_o*(T_cur[-2]-T_cur[-1])/dx - pyro_vol_o*dx/2.0)*dt
-    T_nxt[-1] = max(300., T_cur[-1] + dT_o)
-    rho_nxt[-1] = max(rho_char, rho_cur[-1] + rdot[-1]*dt)
+ax_wall.set_xlim(-2.5, WALL_MM + 1.5)
+ax_wall.set_ylim(-0.08, H + 0.12)
+ax_wall.set_xlabel("Depth into wall from hot face  (mm)", fontsize=10, labelpad=6)
+ax_wall.set_facecolor(BG)
+ax_wall.set_yticks([])
+for sp in ax_wall.spines.values(): sp.set_visible(False)
+ax_wall.tick_params(axis='x',colors="#7070a0",labelsize=9)
 
-    T_cur[:]   = T_nxt
-    rho_cur[:] = rho_nxt
+# Title
+ax_wall.text(WALL_MM/2, H+0.09,
+             "ENGINE GENESIS  ·  COMBUSTION CHAMBER LINER  ·  Canvas Phenolic Grade CE",
+             ha="center", va="bottom", color="#d0c8f0", fontsize=13,
+             fontweight="bold", fontfamily="monospace",
+             path_effects=[pe.withStroke(linewidth=3,foreground=BG)])
 
-    if t % STRIDE == 0 and frame_idx < n_frames:
-        T_hist[frame_idx]       = T_cur.copy()
-        rho_hist[frame_idx]     = rho_cur.copy()
-        mdot_g_hist[frame_idx]  = mdot_g.copy()
-        L_hist[frame_idx]       = L_initial - recession_depth
-        recession_hist[frame_idx] = recession_depth
-        mdot_blowing_hist[frame_idx] = mdot_total
-        Tw_hist[frame_idx]      = T_cur[0]
-        frame_idx += 1
+# ── Static wall background (full thickness, cold grey) ───────────────────────
+ax_wall.fill_betweenx([0, H], 0, WALL_MM, color="#14142a", zorder=1)
+ax_wall.fill_betweenx([0, H], WALL_MM, WALL_MM+0.8, color="#1a1a30", zorder=1)  # structure behind
 
-print(f"Pre-simulation complete. {frame_idx} animation frames buffered.")
+# Back-face structural wall label
+ax_wall.text(WALL_MM+0.9, H/2, "structural\ncasing",
+             color="#2a3a50", fontsize=7.5, fontfamily="monospace",
+             va="center", ha="left", rotation=90)
 
-# ═══════════════════════════════════════════════════════════
-# 2.  COLOUR MAP  (300 K → ~2500 K: black-body inspired)
-# ═══════════════════════════════════════════════════════════
-cmap_data = {
-    "red":   [(0.00, 0.02, 0.02), (0.30, 0.12, 0.12), (0.55, 0.80, 0.80),
-              (0.78, 1.00, 1.00), (1.00, 1.00, 1.00)],
-    "green": [(0.00, 0.02, 0.02), (0.30, 0.02, 0.02), (0.55, 0.20, 0.20),
-              (0.78, 0.55, 0.55), (1.00, 0.97, 0.97)],
-    "blue":  [(0.00, 0.12, 0.12), (0.30, 0.35, 0.35), (0.55, 0.04, 0.04),
-              (0.78, 0.02, 0.02), (1.00, 0.90, 0.90)],
-}
-heat_cmap = mcolors.LinearSegmentedColormap("incandescent", cmap_data, N=512)
+# ── N_COL vertical columns coloured by T and char fraction ───────────────────
+N_COL = 200   # number of vertical colour columns across wall thickness
+col_edges = np.linspace(0, WALL_MM, N_COL+1)
+col_patches_T    = []   # temperature heat-map rectangles
+col_patches_char = []   # char-fraction overlay rectangles
 
-T_MIN, T_MAX = 300.0, 2200.0
-norm_T = mcolors.Normalize(vmin=T_MIN, vmax=T_MAX)
+from matplotlib.patches import Rectangle
+for c in range(N_COL):
+    x0, x1 = col_edges[c], col_edges[c+1]
+    # Heat-map layer (full height)
+    rT = Rectangle((x0,0), x1-x0, H, color=cmap_bb(0.), zorder=2, lw=0)
+    ax_wall.add_patch(rT)
+    col_patches_T.append(rT)
+    # Char overlay (inner 40% of each column — nearer the hot face the char sits)
+    rC = Rectangle((x0,0), x1-x0, H, color="#111", zorder=3, lw=0, alpha=0.)
+    ax_wall.add_patch(rC)
+    col_patches_char.append(rC)
 
-# ═══════════════════════════════════════════════════════════
-# 3.  FIGURE LAYOUT
-# ═══════════════════════════════════════════════════════════
-fig = plt.figure(figsize=(16, 9), facecolor="#0a0a0f")
-fig.suptitle(
-    "ENGINE GENESIS  ·  1-D Transient Ablation  ·  Real-Time Playback",
-    color="#e8d8b0", fontsize=13, fontweight="bold", y=0.97,
-    fontfamily="monospace",
-)
+# ── Hot face glow line (dynamic, left edge of wall) ──────────────────────────
+# Physical recession is tiny; we show it exaggerated by EXAG factor
+hotface_line = ax_wall.axvline(0., color="#ff3300", lw=3, zorder=8,
+    path_effects=[pe.withStroke(linewidth=6,foreground="#ff110022")])
 
-# Grid: 2 rows × 3 cols
-gs = fig.add_gridspec(
-    2, 3,
-    left=0.06, right=0.98,
-    top=0.91,  bottom=0.07,
-    wspace=0.35, hspace=0.40,
-)
+# Original hot-face reference
+ax_wall.axvline(0., color="#336688", lw=0.8, ls=":", zorder=4, alpha=0.5)
 
-ax_main   = fig.add_subplot(gs[:, 0])   # tall: cross-section heat map
-ax_rho    = fig.add_subplot(gs[0, 1])   # density / char fraction
-ax_flux   = fig.add_subplot(gs[1, 1])   # outgassing flux profile
-ax_tw     = fig.add_subplot(gs[0, 2])   # inner wall temperature history
-ax_rec    = fig.add_subplot(gs[1, 2])   # recession depth history
+# Recession marker (exaggerated, moves rightward as material is consumed)
+rec_marker_line = ax_wall.axvline(0., color="#ff8800", lw=2., ls="--", zorder=9, alpha=0.9)
 
-for ax in [ax_main, ax_rho, ax_flux, ax_tw, ax_rec]:
-    ax.set_facecolor("#0d0d18")
-    for sp in ax.spines.values(): sp.set_edgecolor("#3a3a5c")
-    ax.tick_params(colors="#9090c0", labelsize=8)
-    ax.xaxis.label.set_color("#9090c0")
-    ax.yaxis.label.set_color("#9090c0")
-    ax.title.set_color("#c8c0e0")
+# Hot-gas region left of hot face
+hg_fill = ax_wall.fill_betweenx([0,H], -2.5, 0., color="#1a0800", zorder=1)
+hg_edge, = ax_wall.plot([0.,0.], [0.,H], color="#ff3300", lw=3, zorder=8,
+    path_effects=[pe.withStroke(linewidth=6,foreground="#ff110022")])
 
-# ── MAIN: cross-section heat map ──────────────────────────────────────────────
-N_STRIP = 80     # visual strips in the height direction
-WALL_HEIGHT_VIS = 1.0   # normalised height
+# Gas-core label
+ax_wall.text(-1.25, H/2, "hot gas\ncore", color="#553322", fontsize=8,
+             fontfamily="monospace", ha="center", va="center")
 
-ax_main.set_xlim(-0.5, 14)          # x in mm; left is hot wall
-ax_main.set_ylim(0, WALL_HEIGHT_VIS)
-ax_main.set_xlabel("Depth into wall from hot face (mm)", fontsize=9)
-ax_main.set_ylabel("Nozzle axial slice (normalised)", fontsize=9)
-ax_main.set_title("Live Wall Cross-Section\n(Heat Map · Char · Flux)", fontsize=9)
-ax_main.set_yticks([])
+# ── Pyrolysis gas arrows — emerge from hot face leftward into gas core ────────
+n_arr = 9
+arr_y = np.linspace(0.08, 0.92, n_arr)
+gas_arrows = []
+for ay in arr_y:
+    a = ax_wall.annotate("",
+        xy=(-1.5, ay), xytext=(1.2, ay),
+        arrowprops=dict(arrowstyle="->", color="#00ffaa", lw=1.8, mutation_scale=12),
+        zorder=10, annotation_clip=False)
+    a.set_alpha(0.)
+    gas_arrows.append(a)
 
-# Temperature image: each column is a node, rows fill the wall height
-# We'll render as a stack of horizontal filled bars via LineCollection
-# Pre-build a set of horizontal lines that we will update each frame
-y_centers = np.linspace(0.05, 0.95, N_STRIP)
-strip_height = (0.95 - 0.05) / N_STRIP
+# ── Depth annotation lines at key depths ─────────────────────────────────────
+# Char front depth indicator (dynamic dashed vertical)
+char_front_line = ax_wall.axvline(0., color="#ff9933", lw=1.2, ls="-.", zorder=7, alpha=0.)
+char_front_label = ax_wall.text(0., H+0.03, "", color="#ff9933",
+    fontsize=8, fontfamily="monospace", ha="center", va="bottom")
 
-# For efficiency use an imshow with extent updated each frame
-T_img_data = np.ones((N_STRIP, N)) * 300.0
-im_heat = ax_main.imshow(
-    T_img_data,
-    aspect="auto", origin="lower",
-    cmap=heat_cmap, norm=norm_T,
-    extent=[0, L_initial*1000, 0, WALL_HEIGHT_VIS],
-    interpolation="bilinear",
-    zorder=2,
-)
+# Fixed depth callout at bondline (right edge)
+ax_wall.axvline(WALL_MM, color="#336688", lw=1.0, ls=":", zorder=4, alpha=0.6)
+ax_wall.text(WALL_MM, -0.04, f"{WALL_MM:.1f} mm\n(bondline)", color="#336688",
+             fontsize=7.5, fontfamily="monospace", ha="center", va="top")
 
-# Colorbar
-cbar = fig.colorbar(im_heat, ax=ax_main, orientation="vertical",
-                    fraction=0.04, pad=0.02)
-cbar.set_label("Temperature (K)", color="#9090c0", fontsize=8)
-cbar.ax.yaxis.set_tick_params(color="#9090c0", labelsize=7)
-plt.setp(cbar.ax.yaxis.get_ticklabels(), color="#9090c0")
+# ── Scale bar showing actual vs exaggerated recession ────────────────────────
+# Drawn once, updated each frame
+sb_y = -0.055
+scalebar_actual = ax_wall.annotate("",
+    xy=(0.,sb_y), xytext=(0.,sb_y),
+    arrowprops=dict(arrowstyle="<->", color="#888888", lw=1.2),
+    annotation_clip=False)
+scalebar_label = ax_wall.text(0., sb_y-0.012, "", color="#888888",
+    fontsize=7.5, fontfamily="monospace", ha="center", va="top")
 
-# Eroding wall boundary line
-wall_line, = ax_main.plot([], [], color="#ff4040", lw=2.5, zorder=5, label="Hot face")
-orig_wall_line = ax_main.axvline(x=L_initial*1000, color="#4488ff",
-                                  lw=1.2, ls="--", zorder=4, label="Original OD")
-ax_main.legend(fontsize=7, facecolor="#151528", edgecolor="#3a3a5c",
-               labelcolor="#c0c0e0", loc="upper right")
+exag_note = ax_wall.text(WALL_MM/2, -0.055,
+    f"Recession shown at {EXAG:.0f}× exaggeration for visibility",
+    color="#556688", fontsize=8, fontfamily="monospace", ha="center", va="center")
 
-# Gas flux arrows (quiver) — outward direction (leftward in frame)
-arrow_y  = np.linspace(0.15, 0.85, 8)
-arrow_x  = np.zeros(8)
-arrow_u  = np.zeros(8) - 0.8
-arrow_v  = np.zeros(8)
-quiv = ax_main.quiver(
-    arrow_x, arrow_y, arrow_u, arrow_v,
-    color="#00ffcc", alpha=0.0,
-    scale=15, width=0.006, zorder=6,
-    headwidth=4, headlength=5,
-)
+# ── Colorbar ─────────────────────────────────────────────────────────────────
+sm=plt.cm.ScalarMappable(cmap=cmap_bb,norm=norm_T); sm.set_array([])
+cbar_ax=fig.add_axes([0.02,0.03,0.38,0.020])
+cbar=fig.colorbar(sm,cax=cbar_ax,orientation="horizontal")
+cbar.set_label("Wall temperature  (K)", color="#7070a0", fontsize=8.5)
+cbar.ax.xaxis.set_tick_params(color="#7070a0",labelsize=7.5)
+plt.setp(cbar.ax.xaxis.get_ticklabels(),color="#7070a0")
+cbar_ax.set_facecolor(BG)
 
-# Time stamp
-time_text = ax_main.text(
-    0.97, 0.04, "t = 0.00 s",
-    transform=ax_main.transAxes,
-    color="#ffd080", fontsize=11, ha="right", va="bottom",
-    fontfamily="monospace", fontweight="bold",
-)
+# ── Legend ────────────────────────────────────────────────────────────────────
+leg_patches=[
+    mpatches.Patch(color="#ff3300",label="Hot face (ablating)"),
+    mpatches.Patch(color="#ff8800",label=f"Receded surface ({EXAG:.0f}× exag.)"),
+    mpatches.Patch(color="#ff9933",label="Char front"),
+    mpatches.Patch(color="#00ffaa",label="Pyrolysis gas flux"),
+]
+ax_wall.legend(handles=leg_patches, loc="upper right", fontsize=8,
+    facecolor="#0d0d22", edgecolor=EDGE, labelcolor="#c0b8e0", framealpha=0.92)
 
-# ── Density / char fraction ────────────────────────────────────────────────────
-ax_rho.set_xlabel("Depth (mm)", fontsize=8)
-ax_rho.set_ylabel("Density (kg/m³)", fontsize=8, color="#5599ff")
-ax_rho.set_xlim(0, L_initial*1000)
-ax_rho.set_ylim(700, 1500)
-ax_rho.tick_params(axis="y", labelcolor="#5599ff")
-ax_rho.set_title("Density & Char Front", fontsize=8)
-ax_rho.grid(True, color="#1e1e3a", lw=0.5)
+# ── Timestamp & telemetry ─────────────────────────────────────────────────────
+time_lbl=ax_wall.text(0.01,0.97,"t = 0.00 s",transform=ax_wall.transAxes,
+    color="#ffd080",fontsize=14,fontweight="bold",fontfamily="monospace",
+    va="top",ha="left",path_effects=[pe.withStroke(linewidth=3,foreground=BG)])
 
-ax_rho2 = ax_rho.twinx()
-ax_rho2.set_ylim(0, 1.05)
-ax_rho2.set_ylabel("Char Fraction", fontsize=8, color="#ff9933")
-ax_rho2.tick_params(axis="y", labelcolor="#ff9933", labelsize=7)
+tel=ax_wall.text(0.01,0.88,"",transform=ax_wall.transAxes,
+    color="#88ffbb",fontsize=9,va="top",ha="left",fontfamily="monospace",
+    bbox=dict(facecolor="#080818",edgecolor="#1a3a2a",alpha=0.92,pad=5,
+              boxstyle="round,pad=0.4"),zorder=12)
 
-rho_line,  = ax_rho.plot([], [], color="#5599ff", lw=1.5)
-char_line, = ax_rho2.plot([], [], color="#ff9933", lw=1.5, ls="--")
-ax_rho.set_facecolor("#0d0d18")
+# ── Thermal wave depth marker ─────────────────────────────────────────────────
+wave_line = ax_wall.axvline(0., color="#8866ff", lw=1.2, ls=":", zorder=6, alpha=0.7)
+wave_label= ax_wall.text(0., H*0.55, "", color="#8866ff",
+    fontsize=7.5, fontfamily="monospace", ha="left", va="center",
+    path_effects=[pe.withStroke(linewidth=2,foreground=BG)])
 
-# ── Outgassing flux ────────────────────────────────────────────────────────────
-ax_flux.set_xlabel("Depth (mm)", fontsize=8)
-ax_flux.set_ylabel("Gas Flux (kg/m²-s)", fontsize=8, color="#00ffcc")
-ax_flux.set_xlim(0, L_initial*1000)
-ax_flux.set_ylim(0, 0.15)
-ax_flux.tick_params(axis="y", labelcolor="#00ffcc")
-ax_flux.set_title("Pyrolysis Gas Outflux Profile", fontsize=8)
-ax_flux.grid(True, color="#1e1e3a", lw=0.5)
+# ═══════════════════════════════════════════════════════════════════════════════
+# 5.  MINI ENGINE SCHEMATIC (top-right, context only)
+# ═══════════════════════════════════════════════════════════════════════════════
+R_ch=5.; T_ch=1.6; Xc=14.; R_th=2.1; X_conv=5.; R_ex=3.8; X_div=12.
+Xt=Xc+X_conv; Xe=Xt+X_div
+N_PTS=300; x_e=np.linspace(0,Xe,N_PTS)
 
-flux_fill = ax_flux.fill_between([], [], color="#00ffcc", alpha=0.25)
-flux_line, = ax_flux.plot([], [], color="#00ffcc", lw=1.5)
+def r_inner_fn(x):
+    r=np.empty_like(x,dtype=float)
+    mc=x<=Xc; r[mc]=R_ch
+    mcv=(x>Xc)&(x<=Xt); t=(x[mcv]-Xc)/X_conv
+    r[mcv]=R_ch+(R_th-R_ch)*(1-np.cos(np.pi*t))/2
+    mdv=x>Xt; t2=(x[mdv]-Xt)/X_div
+    r[mdv]=R_th+(R_ex-R_th)*(1-np.cos(np.pi*t2))/2
+    return r
 
-# ── Inner wall temperature history ─────────────────────────────────────────────
-time_axis_full = np.linspace(0, burn_time, n_frames)
-ax_tw.set_xlabel("Time (s)", fontsize=8)
-ax_tw.set_ylabel("T_wall (K)", fontsize=8, color="#ff6666")
-ax_tw.set_xlim(0, burn_time)
-ax_tw.set_ylim(200, 2400)
-ax_tw.set_title("Inner Wall Temperature", fontsize=8)
-ax_tw.tick_params(axis="y", labelcolor="#ff6666")
-ax_tw.grid(True, color="#1e1e3a", lw=0.5)
+ri_e=r_inner_fn(x_e)
+ro_ch=R_ch+T_ch; ro_noz=ri_e+0.9
+ro_noz[x_e<=Xc]=ro_ch
 
-tw_line, = ax_tw.plot([], [], color="#ff6666", lw=1.5)
-tw_dot,  = ax_tw.plot([], [], "o", color="#ff6666", ms=5)
+ax_eng.set_xlim(-1,Xe+1); ax_eng.set_ylim(-(R_ch+T_ch+1),(R_ch+T_ch+1))
+ax_eng.set_aspect("equal"); ax_eng.axis("off")
+ax_eng.set_title("Engine cross-section", fontsize=8, pad=3)
 
-# ── Recession depth history ────────────────────────────────────────────────────
-ax_rec.set_xlabel("Time (s)", fontsize=8)
-ax_rec.set_ylabel("Recession (mm)", fontsize=8, color="#c060ff")
-ax_rec.set_xlim(0, burn_time)
-ax_rec.set_ylim(0, max(recession_hist)*1000 * 1.15 + 0.01)
-ax_rec.set_title("Surface Recession Depth", fontsize=8)
-ax_rec.tick_params(axis="y", labelcolor="#c060ff")
-ax_rec.grid(True, color="#1e1e3a", lw=0.5)
+# Gas core
+for idx,xi in enumerate(np.linspace(0,1,40)):
+    x0=xi*Xe; x1=x0+Xe/40
+    ri0=r_inner_fn(np.array([x0]))[0]; ri1=r_inner_fn(np.array([x1]))[0]
+    alpha=0.10+0.08*np.sin(np.pi*xi)
+    ax_eng.fill_between([x0,x1],[-ri0,-ri1],[ri0,ri1],color=(1.,.4,.05,alpha),zorder=2)
 
-rec_line, = ax_rec.plot([], [], color="#c060ff", lw=1.5)
-rec_dot,  = ax_rec.plot([], [], "o", color="#c060ff", ms=5)
+# Nozzle wall
+x_noz_s=x_e[x_e>Xc]; ri_ns=r_inner_fn(x_noz_s); ro_ns=ri_ns+0.9
+ax_eng.fill_between(x_noz_s, ri_ns, ro_ns,  color="#1c2530",zorder=3)
+ax_eng.fill_between(x_noz_s,-ro_ns,-ri_ns,  color="#1c2530",zorder=3)
+ax_eng.plot(x_noz_s, ro_ns,  color="#3a5060",lw=0.8,zorder=4)
+ax_eng.plot(x_noz_s,-ro_ns,  color="#3a5060",lw=0.8,zorder=4)
 
-# ── Telemetry box ──────────────────────────────────────────────────────────────
-tel_text = ax_main.text(
-    0.03, 0.97,
-    "",
-    transform=ax_main.transAxes,
-    color="#a0ffa0", fontsize=7.5, va="top", fontfamily="monospace",
-    bbox=dict(facecolor="#0a0a14", edgecolor="#224422", alpha=0.85, pad=3),
-    zorder=10,
-)
+# Chamber ablative liner (coloured rectangle, updated per frame)
+ch_patch_u=ax_eng.fill_between([0,Xc],[R_ch,R_ch],[ro_ch,ro_ch],
+    color=cmap_bb(0.),zorder=3)
+ch_patch_l=ax_eng.fill_between([0,Xc],[-ro_ch,-ro_ch],[-R_ch,-R_ch],
+    color=cmap_bb(0.),zorder=3)
+ax_eng.plot([0,Xc],[ro_ch,ro_ch], color="#3a5060",lw=0.8,zorder=5)
+ax_eng.plot([0,Xc],[-ro_ch,-ro_ch],color="#3a5060",lw=0.8,zorder=5)
+ax_eng.plot([0,Xc],[R_ch,R_ch],   color="#6688aa",lw=0.8,zorder=5)
+ax_eng.plot([0,Xc],[-R_ch,-R_ch], color="#6688aa",lw=0.8,zorder=5)
+ax_eng.axhline(0,color="#1a1a38",lw=0.5,ls="--",zorder=1)
 
-# ═══════════════════════════════════════════════════════════
-# 4.  ANIMATION FUNCTION
-# ═══════════════════════════════════════════════════════════
+# Chamber label
+ax_eng.text(Xc/2,ro_ch+0.3,"ablative liner",color="#4466aa",
+    fontsize=5.5,fontfamily="monospace",ha="center")
+ax_eng.text(Xt+X_div/2,R_ex+1.2,"nozzle (steel)",color="#445566",
+    fontsize=5.5,fontfamily="monospace",ha="center")
+
+# Zoom-arrow pointing from engine chamber to main wall panel
+ax_eng.annotate("", xy=(0.0,0.5), xytext=(-0.5,0.5),
+    xycoords="axes fraction", textcoords="axes fraction",
+    arrowprops=dict(arrowstyle="-|>",color="#6688aa",lw=1.5,
+                    connectionstyle="arc3,rad=0.0"),annotation_clip=False)
+ax_eng.text(-0.55,0.5,"  zoom →",transform=ax_eng.transAxes,
+    color="#4466aa",fontsize=7,fontfamily="monospace",va="center",ha="right")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 6.  RIGHT CHARTS
+# ═══════════════════════════════════════════════════════════════════════════════
+t_ax=np.linspace(0,burn_time,n_frames)
+
+ax_tw.set_xlim(0,burn_time); ax_tw.set_ylim(200,2600)
+ax_tw.set_xlabel("Time (s)",fontsize=8); ax_tw.set_ylabel("T (K)",fontsize=8,color="#ff6644")
+ax_tw.tick_params(axis="y",labelcolor="#ff6644")
+ax_tw.set_title("Inner wall temperature",fontsize=8)
+ax_tw.grid(True,color="#151528",lw=0.5)
+ax_tw.axhline(1800,color="#ff6633",lw=0.7,ls="--",alpha=0.55)
+ax_tw.text(7.6,1840,"char onset",color="#ff6633",fontsize=7,ha="right")
+tw_line,=ax_tw.plot([],[],color="#ff6644",lw=1.8)
+tw_dot, =ax_tw.plot([],[],">",color="#ffaa44",ms=6,zorder=5)
+
+ax_rec.set_xlim(0,burn_time)
+ax_rec.set_xlabel("Time (s)",fontsize=8)
+ax_rec.set_ylabel("Recession (mm)",fontsize=8,color="#cc88ff")
+ax_rec.tick_params(axis="y",labelcolor="#cc88ff")
+ax_rec.set_ylim(0, max(rec_hist)*1000*1.3+0.01)
+ax_rec.set_title("Recession depth  &  blowing flux",fontsize=8)
+ax_rec.grid(True,color="#151528",lw=0.5)
+ax_rec2=ax_rec.twinx()
+ax_rec2.set_ylim(0,max(mdot_hist)*1.4+0.005)
+ax_rec2.set_ylabel("ṁ_blow (kg/m²·s)",fontsize=8,color="#44ccff")
+ax_rec2.tick_params(axis="y",labelcolor="#44ccff",labelsize=7)
+ax_rec2.set_facecolor(PANEL)
+for sp in ax_rec2.spines.values(): sp.set_edgecolor(EDGE)
+rec_line, =ax_rec.plot([],[],color="#cc88ff",lw=1.8)
+rec_dot,  =ax_rec.plot([],[],"o",color="#ee88ff",ms=6,zorder=5)
+blow_line,=ax_rec2.plot([],[],color="#44ccff",lw=1.4,ls="--")
+
+fig.text(0.50,0.003,
+    "Engine Genesis  —  1-D Charring Ablation  |  Canvas Phenolic Grade CE  |  "
+    f"Recession exaggerated {EXAG:.0f}× for visibility",
+    ha="center",color="#2a2a50",fontsize=7,fontfamily="monospace")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 7.  UPDATE FUNCTION
+# ═══════════════════════════════════════════════════════════════════════════════
+# Pre-compute node positions in mm for the full initial wall
+node_x_mm = np.linspace(0, WALL_MM, N)   # fixed spatial reference
+
 def update(frame):
-    fi = min(frame, n_frames - 1)
-    T_f   = T_hist[fi]
-    rho_f = rho_hist[fi]
-    mg_f  = mdot_g_hist[fi]
-    L_f   = L_hist[fi]
-    rec_f = recession_hist[fi]
-    t_now = fi * STRIDE * dt
-    Tw    = Tw_hist[fi]
-    mdot_bw = mdot_blowing_hist[fi]
+    fi_=min(frame,n_frames-1)
+    T_f   =T_hist[fi_]; rho_f =rho_hist[fi_]; mg_f=mdot_g_hist[fi_]
+    L_f   =L_hist[fi_]; rec_f =rec_hist[fi_];  Tw =Tw_hist[fi_]
+    mb    =mdot_hist[fi_]; Bc_f=Bc_hist[fi_];  hgb=hgb_hist[fi_]
+    t_now =fi_*STRIDE*dt
 
-    # x-axis in mm for this frame (hot face is always x=0)
-    x_mm = np.linspace(0, L_f * 1000, N)
+    # ── Wall column colours ──────────────────────────────────────────────────
+    gamma=np.clip((rho_virgin-rho_f)/(rho_virgin-rho_char),0.,1.)
 
-    # ── Heat map update ──────────────────────────────────────────────────
-    # Broadcast T_f into the N_STRIP-row image
-    T_2d = np.tile(T_f, (N_STRIP, 1))
-    im_heat.set_data(T_2d)
-    im_heat.set_extent([0, L_f*1000, 0, WALL_HEIGHT_VIS])
+    for c in range(N_COL):
+        xi_norm=(c+0.5)/N_COL          # 0=hot face, 1=cold back
+        # Corresponding 1D node index
+        node_idx=int(xi_norm*(N-1))
+        T_c   = T_f[node_idx]
+        char_c= gamma[node_idx]
 
-    # Eroding hot face line
-    wall_line.set_data([0, 0], [0, WALL_HEIGHT_VIS])
+        col_patches_T[c].set_facecolor(cmap_bb(norm_T(T_c)))
+        # Char overlay alpha proportional to char fraction
+        col_patches_char[c].set_facecolor(cmap_char(char_c))
+        col_patches_char[c].set_alpha(np.clip(0.1+0.85*char_c, 0, 0.9))
 
-    # ── Quiver: scale arrows by surface gas flux ──────────────────────────
-    flux_scale = np.clip(mdot_bw / 0.10, 0, 1)
-    quiv.set_alpha(min(flux_scale * 0.9, 0.85))
-    new_x = np.zeros(8) + 0.05  # just inside hot face
-    quiv.set_offsets(np.column_stack([new_x, arrow_y]))
-    quiv.set_UVC(np.full(8, -flux_scale * 1.0), np.zeros(8))
+    # ── Exaggerated recession — hot face line shifts right ───────────────────
+    rec_vis_mm = rec_f * 1000. * EXAG   # mm, exaggerated
+    # Clamp so it never exceeds 40% of wall (prevents visual confusion)
+    rec_vis_mm = min(rec_vis_mm, WALL_MM * 0.40)
 
-    # Time stamp
-    time_text.set_text(f"t = {t_now:.2f} s")
+    # Update hot-face position
+    hotface_line.set_xdata([rec_vis_mm, rec_vis_mm])
+    hg_edge.set_xdata([rec_vis_mm, rec_vis_mm])
+    rec_marker_line.set_xdata([rec_vis_mm, rec_vis_mm])
 
-    # ── Density / char ───────────────────────────────────────────────────
-    gamma_f = np.clip((rho_virgin - rho_f) / (rho_virgin - rho_char), 0, 1)
-    rho_line.set_data(x_mm, rho_f)
-    char_line.set_data(x_mm, gamma_f)
-    ax_rho.set_xlim(0, max(x_mm[-1], 0.01))
+    # Hot-gas fill now extends to rec_vis_mm
+    for coll in ax_wall.collections[:]:
+        pass  # don't clear all — just update specific ones below
 
-    # ── Flux profile ─────────────────────────────────────────────────────
-    flux_line.set_data(x_mm, mg_f)
-    for coll in ax_flux.collections[:]:
-        coll.remove()
-    ax_flux.fill_between(x_mm, mg_f, color="#00ffcc", alpha=0.20)
-    ax_flux.set_xlim(0, max(x_mm[-1], 0.01))
-    ax_flux.set_ylim(0, max(mg_f.max() * 1.15, 0.005))
+    # ── Char front indicator ──────────────────────────────────────────────────
+    # Find deepest node where gamma > 0.05
+    char_nodes = np.where(gamma > 0.05)[0]
+    if len(char_nodes) > 0:
+        char_depth_mm = node_x_mm[char_nodes[-1]]
+        char_front_line.set_xdata([char_depth_mm, char_depth_mm])
+        char_front_line.set_alpha(0.75)
+        char_front_label.set_x(char_depth_mm)
+        char_front_label.set_text(f"char\n{char_depth_mm:.1f} mm")
+    else:
+        char_front_line.set_alpha(0.)
+        char_front_label.set_text("")
 
-    # ── T_wall history ───────────────────────────────────────────────────
-    tw_line.set_data(time_axis_full[:fi+1], Tw_hist[:fi+1])
-    tw_dot.set_data([time_axis_full[fi]], [Tw])
+    # ── Thermal wave penetration depth (T > 350 K) ───────────────────────────
+    hot_nodes = np.where(T_f > 350.)[0]
+    if len(hot_nodes) > 0:
+        wave_depth_mm = node_x_mm[hot_nodes[-1]]
+        wave_line.set_xdata([wave_depth_mm, wave_depth_mm])
+        wave_label.set_x(wave_depth_mm + 0.15)
+        wave_label.set_y(H * 0.30)
+        wave_label.set_text(f"thermal\nwave\n{wave_depth_mm:.1f} mm")
 
-    # ── Recession history ─────────────────────────────────────────────────
-    rec_vals = recession_hist[:fi+1] * 1000
-    rec_line.set_data(time_axis_full[:fi+1], rec_vals)
-    rec_dot.set_data([time_axis_full[fi]], [rec_f * 1000])
+    # ── Pyrolysis arrows: alpha scales with blowing flux ─────────────────────
+    flux_scale = np.clip(mb / 0.12, 0., 1.)
+    for a in gas_arrows:
+        a.set_alpha(np.clip(flux_scale * 0.92, 0., 0.95))
+        # Move arrow tail to current exaggerated hot face
+        a.xyann = (rec_vis_mm + 0.8, a.xyann[1])
+        a.xy    = (-1.5, a.xy[1])
 
-    # ── Telemetry ─────────────────────────────────────────────────────────
-    Bc_now = (mdot_bw * cp_pyrolysis_gas) / hg_unblown
-    tel_text.set_text(
-        f"  T_wall  : {Tw:6.0f} K\n"
-        f"  Recess. : {rec_f*1000:.3f} mm\n"
-        f"  ṁ_blow  : {mdot_bw:.4f} kg/m²s\n"
-        f"  B_c     : {Bc_now:.4f}\n"
-        f"  Wall Δ  : {L_f*1000:.3f} mm left"
+    # ── Scale bar annotation ──────────────────────────────────────────────────
+    actual_mm = rec_f * 1000.
+    scalebar_label.set_text(
+        f"actual recession: {actual_mm:.3f} mm  "
+        f"(shown as {rec_vis_mm:.2f} mm  ×{EXAG:.0f})"
     )
+    scalebar_label.set_x(rec_vis_mm / 2.)
 
-    return (im_heat, wall_line, quiv, time_text, rho_line, char_line,
-            flux_line, tw_line, tw_dot, rec_line, rec_dot, tel_text)
+    # ── Telemetry ─────────────────────────────────────────────────────────────
+    hg_redn=(1.-hgb/hg_unblown)*100.
+    remaining_mm=(L_f*1000.)
+    tel.set_text(
+        f"  T_wall    {Tw:6.0f} K\n"
+        f"  Recession {actual_mm:.4f} mm\n"
+        f"  ṁ_blow   {mb:.4f} kg/m²s\n"
+        f"  Bc        {Bc_f:.4f}\n"
+        f"  hg redn  {hg_redn:.1f} %\n"
+        f"  Liner rem {remaining_mm:.2f} mm\n"
+        f"  Margin    {remaining_mm/L_initial/10.:.0f}× (vs full thickness)"
+    )
+    time_lbl.set_text(f"t = {t_now:.2f} s")
 
-# ═══════════════════════════════════════════════════════════
-# 5.  RUN
-# ═══════════════════════════════════════════════════════════
-anim = animation.FuncAnimation(
-    fig,
-    update,
-    frames=n_frames,
-    interval=12.67,        # ms between frames → ~60 fps playback
-    blit=False,
-    repeat=False,
-)
+    # ── Mini engine: colour chamber liner by surface temperature ─────────────
+    col_eng = cmap_bb(norm_T(Tw))
+    ch_patch_u.set_facecolor(col_eng)
+    ch_patch_l.set_facecolor(col_eng)
 
-print("Rendering animation …")
-try:
+    # ── Right panels ──────────────────────────────────────────────────────────
+    tw_line.set_data(t_ax[:fi_+1],Tw_hist[:fi_+1])
+    tw_dot.set_data([t_ax[fi_]],[Tw])
+    rec_line.set_data(t_ax[:fi_+1],rec_hist[:fi_+1]*1000.)
+    rec_dot.set_data([t_ax[fi_]],[rec_f*1000.])
+    blow_line.set_data(t_ax[:fi_+1],mdot_hist[:fi_+1])
+
+    return []
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 8.  RENDER
+# ═══════════════════════════════════════════════════════════════════════════════
+FPS=60 if SAVE_VIDEO else 30
+anim=animation.FuncAnimation(fig,update,frames=n_frames,
+    interval=int(1000/FPS),blit=False,repeat=False)
+
+if SAVE_VIDEO:
+    print(f"[ Engine Genesis ] Saving {n_frames} frames @ {FPS}fps...",flush=True)
+    writer=animation.FFMpegWriter(fps=FPS,codec="libx264",bitrate=12000,
+        extra_args=["-crf","12","-preset","slow",
+                    "-pix_fmt","yuv420p","-movflags","+faststart"])
+    anim.save(OUTPUT_PATH,writer=writer,dpi=150,
+        savefig_kwargs={"facecolor":fig.get_facecolor()})
+    print(f"[ Engine Genesis ] Saved: {OUTPUT_PATH}",flush=True)
+else:
+    print("[ Engine Genesis ] Opening interactive window...",flush=True)
     plt.show()
-except Exception:
-    # Headless fallback: save to MP4
-    print("No display found – saving ablation_animation.mp4 …")
-    Writer = animation.FFMpegWriter(fps=25, bitrate=2000)
-    anim.save("/mnt/user-data/outputs/ablation_animation.mp4", writer=Writer, dpi=120)
-    print("Saved: /mnt/user-data/outputs/ablation_animation.mp4")
