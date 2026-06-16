@@ -4,25 +4,19 @@ import matplotlib.pyplot as plt
 #Author: Luke Tocco
 
 #Material Constants (Grade CE Canvas Phenolic)
-rho_virgin = 1.38e3       #kg/m^3, MIL-I-24768 Grade CE range 1340-1400
-rho_char   = 800          #kg/m^3, ~58% of virgin, consistent with published char measurements
-burn_time  = 8            #seconds, approximate burn time of engine
+rho_virgin = 1.38e3       #kg/m^3,
+rho_char   = 800          #kg/m^3,
+burn_time  = 8            #seconds
 delta_h_pyro     = 2.3e6  #J/kg, Goldstein phenolic resin decomposition enthalpy
-cp_pyrolysis_gas = 3200   #J/kg-K, mixed C-H-O pyrolysis gas equilibrium at ~1200 K
-B_prime_c = 0.08          #Dimensionless thermochemical ablation potential; fuel-rich (phi~2.2) approximation.
-                          #Will be replaced with ACE surface chemistry tables once RPA products are finalized.
+B_prime_c = 0.08          #Dimensionless thermochemical ablation potential.
 
-#   Temperature-Dependent Thermal Properties (Grade CE Canvas Phenolic) 
-#   Sources: JPL TR 32-1010, NASA TN D-2991, Southern Research Institute char conductivity data.
-#   Uncertainty is approximately +/-15-20%
+#Temperature-Dependent Thermal Properties (Grade CE Canvas Phenolic) 
 
 # Thermal conductivity of virgin phenolic [W/m-K] vs temperature [K]
 k_v_T   = np.array([300,   400,   500,   600,   700,   800  ])
 k_v_val = np.array([0.290, 0.310, 0.330, 0.350, 0.370, 0.390])
 
 # Thermal conductivity of char [W/m-K] vs temperature [K]
-# Char conductivity rises steeply in the graphitization regime above ~1400 K.
-# Canvas phenolic char sits at ~55% of carbon-fiber char values (less graphitic fiber).
 k_c_T   = np.array([700,   900,   1100,  1400,  1700,  2000,  2500 ])
 k_c_val = np.array([0.680, 0.820, 0.980, 1.200, 1.500, 1.850, 2.600])
 
@@ -34,14 +28,35 @@ cp_v_val = np.array([1300, 1420, 1560, 1720, 1870, 1950])
 cp_c_T   = np.array([700, 900, 1100, 1400, 1700, 2000, 2500])
 cp_c_val = np.array([900, 980, 1060, 1190, 1340, 1490, 1700])
 
-#   Arrhenius Parameters for Charring Rate 
-B = 3e9   #1/s, aggregate single-step pre-exponential; Goldstein phenolic kinetics baseline
-E = 1.4e5 #J/mol, Goldstein Reaction B activation energy
-m = 2     #reaction order (2nd order)
-R = 8.314 #J/mol-K, universal gas constant
+#Cp of the pyrolysis Gas
+cp_g_T = np.array([300,400,500,600,700,800,900,1000,1100,1200,1400,1600,1800,2000,2200,2400])
+cp_g_val = np.array([1249, 1403, 1550, 1679, 1786, 1881, 1968, 2055, 2127, 2192, 2299, 2371, 2411, 2438, 2465, 2492])
+
+#Two Reaction Goldstein Mass Fractions
+#Fraction of rho_virgin that each reaction converts to gas when fully complete
+f_A = 0.252 #low T stage 
+f_B = 0.168 #high T stage
+
+#Sub-densities at t=0 (virgin state)
+rho_A0 = rho_virgin * f_A
+rho_B0 = rho_virgin * f_B
+#rho_inert = rho_char just fyi
+
+#Arrhenius Parameters for Charring Rate 
+# Reaction A — low-T stage
+B_A = 1.20e9   # s⁻¹
+E_A = 1.09e5   # J/mol
+m_A = 2       
+ 
+# Reaction B — high-T stage
+B_B = 4.48e9   # s⁻¹
+E_B = 1.26e5   # J/mol
+m_B = 2        
+ 
+R   = 8.314    # J/mol-K
 
 #1D Geometry and Time Parameters Setup
-L_initial = 0.0127 #m (this is 0.5 inches)
+L_initial = 0.0127 #m (0.5 inches)
 L_current = L_initial
 N = 300
 dt = 0.0005
@@ -56,12 +71,22 @@ T_gas = 2494 #K, Adiabatic wall temperature...due to boundary layer effects, the
 epsilon = 0.85 #emissivity of carbonaceous char surface (published range 0.80–0.95)
 sigma = 5.67e-8 #Stefan-Boltzmann constant, W/m^2-K^4
 
-#Setup SimulationArrays
+#Setup Simulation Arrays
 T_current = np.ones(N) * 300  #initial temperature array
 T_next = np.zeros(N) #array to hold next time step temperatures
 rho_current = np.ones(N) * rho_virgin
 rho_next = np.zeros(N)
-rhodot_array = np.zeros(N) #array to hold the pyrolysis rate at each node for plotting
+
+#Two Reaction Sub Density Arrays
+rho_A = np.ones(N) * rho_A0   # reactive sub-density for Rxn A
+rho_B = np.ones(N) * rho_B0   # reactive sub-density for Rxn B
+rho_A_next = np.zeros(N)
+rho_B_next = np.zeros(N)
+
+#Pyrolysis Rate Arrays
+rhodot_A_array = np.zeros(N)  # dρ_A/dt at each node
+rhodot_B_array = np.zeros(N)  # dρ_B/dt at each node
+rhodot_array   = np.zeros(N)  # total dρ/dt (sum of A + B) for energy sink
 
 #History Tracking
 mass_lost = 0.0 #Stores the integrated mass lost due to pyrolysis
@@ -73,20 +98,34 @@ recession_history = [] # Stores the recession depth at each time step for plotti
 recession_rate_history = [] # Stores the recession rate at each time step for plotting
 
 #Arrehenius Function
-def drho_dt(rho, T, dt):
-    #Calculate the density change using Arrhenius equation
-    if rho <= rho_char:
-        return 0
-    else:
-       reaction_term = ((rho - rho_char) / rho_virgin)**m
-       rhodot = -B * np.exp(-E / (R * T)) * rho_virgin * reaction_term
+def drho_A_dt(rho_A_node, T, dt):
+    """
+    Arrhenius decay rate for Reaction A sub-density [kg/m³/s].
+    psi_A = rho_A_node / rho_A0  (normalised, 1=virgin, 0=fully reacted)
+    rate = -B_A * exp(-E_A/RT) * rho_A0 * psi_A^m_A
+           = -B_A * exp(-E_A/RT) * (rho_A_node^m_A / rho_A0^(m_A-1))
+    """
+    if rho_A_node <= 0.0:
+        return 0.0
+    psi_A = rho_A_node / rho_A0
+    rhodot = -B_A * np.exp(-E_A / (R * T)) * rho_A0 * (psi_A ** m_A)
+    max_rhodot = -rho_A_node / dt
+    return max(rhodot, max_rhodot)
+ 
+ 
+def drho_B_dt(rho_B_node, T, dt):
+    """
+    Arrhenius decay rate for Reaction B sub-density [kg/m³/s].
+    """
+    if rho_B_node <= 0.0:
+        return 0.0
+    psi_B = rho_B_node / rho_B0
+    rhodot = -B_B * np.exp(-E_B / (R * T)) * rho_B0 * (psi_B ** m_B)
+    max_rhodot = -rho_B_node / dt
+    return max(rhodot, max_rhodot)
 
-       max_rhodot = -(rho - rho_char) / dt 
-        
-       # Clip the rate (both are negative, so we take the max, meaning the closest to zero)
-       rhodot = max(rhodot, max_rhodot)
-
-    return rhodot
+def cp_g(T):
+    return np.interp(T, cp_g_T, cp_g_val)
 
 def get_nodal_properties(rho_node, T_node):
     # Char fraction: 0 = fully virgin, 1 = fully charred
@@ -114,7 +153,13 @@ for t in range(time_steps):
 
     #Pre calculate the density change for all nodes
     for i in range(N):
-        rhodot_array[i] = drho_dt(rho_current[i], T_current[i], dt)
+        rdot_A = drho_A_dt(rho_A[i], T_current[i], dt)
+        rdot_B = drho_B_dt(rho_B[i], T_current[i], dt)
+        rhodot_A_array[i] = rdot_A
+        rhodot_B_array[i] = rdot_B
+
+        # Total density loss rate (both reactions together)
+        rhodot_array[i]   = rdot_A + rdot_B
 
     # Calculate cumulative gas mass flux (mdot_g) flowing from back to front
     mdot_g = np.zeros(N)
@@ -137,7 +182,7 @@ for t in range(time_steps):
     #Thermochemical Recession
     #Calculate how much char mass is oxidized into gas
 
-    mdot_char_oxidation = (hg_unblown / cp_pyrolysis_gas) * B_prime_c
+    mdot_char_oxidation = (hg_unblown / cp_g(T_current[0])) * B_prime_c
     recession_rate_surface = mdot_char_oxidation / rho_char
     recession_depth += recession_rate_surface * dt
 
@@ -146,7 +191,7 @@ for t in range(time_steps):
 
 
     #Calculate the blowing parameter Bc
-    Bc = (mdot_total *cp_pyrolysis_gas) / hg_unblown
+    Bc = (mdot_total * cp_g(T_current[0])) / hg_unblown
 
     # Apply the blowing correction to hg (+protection against division by zero)
     if Bc > 0.001:
@@ -171,7 +216,10 @@ for t in range(time_steps):
     ) * dt
     T_next[0] = max(300.0, T_current[0] + dT0)
     
-    rho_next[0] = max(rho_char, rho_current[0] + rhodot_surface * dt)
+    # Update sub-densities at node 0
+    rho_A_next[0] = max(0.0, rho_A[0] + rhodot_A_array[0] * dt)
+    rho_B_next[0] = max(0.0, rho_B[0] + rhodot_B_array[0] * dt)
+    rho_next[0]   = rho_char + rho_A_next[0] + rho_B_next[0]
 
     #------Interior Nodes 1...N-2-----------
 
@@ -195,7 +243,7 @@ for t in range(time_steps):
 
         #Transpiration Term
         #Energy absorbed by gas flowing from i+1 to i
-        gas_convection = (mdot_g[i] * cp_pyrolysis_gas * (T_current[i+1] - T_current[i]) / dx_current) / (rho_current[i] * cp_node)
+        gas_convection = (mdot_g[i] * cp_g(T_current[i]) * (T_current[i+1] - T_current[i]) / dx_current) / (rho_current[i] * cp_node)
 
         #Landau Transformation grid velocity correction
         eta = i / (N-1)
@@ -206,7 +254,10 @@ for t in range(time_steps):
         T_dot = (conduction_term / (rho_current[i] * cp_node) - pyro_sink + gas_convection + grid_velocity_term)
         T_next[i] = max(300.0, T_current[i] + T_dot * dt)
  
-        rho_next[i] = max(rho_char, rho_current[i] + rhodot * dt)
+        # Update sub-densities
+        rho_A_next[i] = max(0.0, rho_A[i] + rhodot_A_array[i] * dt)
+        rho_B_next[i] = max(0.0, rho_B[i] + rhodot_B_array[i] * dt)
+        rho_next[i]   = rho_char + rho_A_next[i] + rho_B_next[i]
 
     #------Node N-1 Outer Wall----------
 
@@ -223,7 +274,10 @@ for t in range(time_steps):
 
     T_next[-1] = max(300.0, T_current[-1] + dT_outer)
  
-    rho_next[-1] = max(rho_char, rho_current[-1] + rhodot_outer * dt)
+    rho_A_next[-1] = max(0.0, rho_A[-1] + rhodot_A_array[-1] * dt)
+    rho_B_next[-1] = max(0.0, rho_B[-1] + rhodot_B_array[-1] * dt)
+    rho_next[-1]   = rho_char + rho_A_next[-1] + rho_B_next[-1]
+
 
     #Update mass loss tracking
     mass_lost += mdot_total * dt
@@ -236,11 +290,14 @@ for t in range(time_steps):
     #Update arrays
     T_current = T_next.copy()
     rho_current = rho_next.copy()
+    rho_A = rho_A_next.copy()
+    rho_B = rho_B_next.copy()
 
 
-# ── Final diagnostics ─────────────────────────────────────────────────────────
+# ===== DIAGNOSTICS AND PLOTS =======
+
 print("=" * 60)
-print("ENGINE GENESIS – 1-D ABLATION SIMULATION (PATCHED)")
+print("ENGINE GENESIS – 1-D ABLATION (TWO-REACTION GOLDSTEIN MODEL)")
 print("=" * 60)
 print(f"Inner wall temperature  : {T_current[0]:.1f} K")
 print(f"Minimum density         : {np.min(rho_current):.1f} kg/m³")
@@ -248,22 +305,43 @@ print(f"Total mass outgassed    : {mass_lost:.4f} kg/m²")
 print(f"Final surface gas flux  : {mdot_total:.5f} kg/m²-s")
 print(f"Total surface recession : {recession_depth*1000:.3f} mm")
 print(f"Remaining wall thickness: {(L_initial - recession_depth)*1000:.3f} mm")
+ 
+# Char fraction profile at end of burn
+gamma_profile = np.clip((rho_virgin - rho_current) / (rho_virgin - rho_char), 0, 1)
+char_depth    = np.where(gamma_profile > 0.05)[0]
+if len(char_depth) > 0:
+    dx_final = (L_initial - recession_depth) / (N - 1)
+    print(f"Char front depth        : {char_depth[-1] * dx_final * 1000:.2f} mm")
+ 
+# Reaction completion summary
+psi_A_surface = rho_A[0] / rho_A0
+psi_B_surface = rho_B[0] / rho_B0
+print(f"Rxn A completion (surf) : {(1-psi_A_surface)*100:.1f}%")
+print(f"Rxn B completion (surf) : {(1-psi_B_surface)*100:.1f}%")
 print("=" * 60)
+
+rhodot_profile = np.array([
+    abs(drho_A_dt(rho_A[i], T_current[i], dt) +
+        drho_B_dt(rho_B[i], T_current[i], dt))
+    for i in range(N)
+])
+rhodot_A_profile = np.array([abs(drho_A_dt(rho_A[i], T_current[i], dt)) for i in range(N)])
+rhodot_B_profile = np.array([abs(drho_B_dt(rho_B[i], T_current[i], dt)) for i in range(N)])
  
-# ── Spatial profiles at end of burn ───────────────────────────────────────────
-rhodot_profile = np.array([abs(drho_dt(rho_current[i], T_current[i], dt)) for i in range(N)])
-gamma_profile  = np.clip((rho_virgin - rho_current) / (rho_virgin - rho_char), 0, 1)
-dx_final = (L_initial - recession_depth) / (N - 1)
-x_axis   = np.linspace(0, (L_initial - recession_depth) * 1000, N)   # mm
+x_axis = np.linspace(0, (L_initial - recession_depth) * 1000, N)
  
-# ── Dashboard Figure ──────────────────────────────────────────────────────────
+# Char advancement profiles
+psi_A_profile = rho_A / rho_A0          # 1=virgin, 0=fully reacted
+psi_B_profile = rho_B / rho_B0
+ 
 fig, axs = plt.subplots(3, 2, figsize=(14, 16))
 fig.suptitle(
-    "Engine Genesis — 1-D Transient Ablation Dashboard (8 s Burn)\n",
-    fontsize=15, fontweight="bold", y=0.96,
+    "Engine Genesis — 1-D Transient Ablation Dashboard (8 s Burn)\n"
+    "Two-Reaction Goldstein Pyrolysis Model",
+    fontsize=14, fontweight="bold", y=0.97,
 )
  
-# 1: Temperature & Density
+# Temperature & Density
 ax1 = axs[0, 0]
 ax1.plot(x_axis, T_current, color="crimson", lw=2, label="Temperature")
 ax1.set_xlabel("Distance from Hot Wall (mm)")
@@ -271,40 +349,55 @@ ax1.set_ylabel("Temperature (K)", color="crimson")
 ax1.tick_params(axis="y", labelcolor="crimson")
 ax1.grid(True, ls=":", alpha=0.6)
 ax1_twin = ax1.twinx()
-ax1_twin.plot(x_axis, rho_current, color="navy", lw=2, ls="--", label="Density")
+ax1_twin.plot(x_axis, rho_current, color="navy",      lw=2, ls="--",  label="Total density")
+ax1_twin.plot(x_axis, rho_A,       color="steelblue", lw=1.5, ls="-.", label="ρ_A (low-T)")
+ax1_twin.plot(x_axis, rho_B,       color="teal",      lw=1.5, ls=":",  label="ρ_B (high-T)")
 ax1_twin.set_ylabel("Density (kg/m³)", color="navy")
 ax1_twin.tick_params(axis="y", labelcolor="navy")
+ax1_twin.legend(fontsize=7, loc="center right")
 ax1.set_title("Final Temperature & Density State")
  
-# 2: Char fraction
-axs[0, 1].plot(x_axis, gamma_profile, color="darkorange", lw=2)
+# Reaction advancement
+axs[0, 1].plot(x_axis, 1 - psi_A_profile, color="steelblue", lw=2,
+               label="Rxn A complete (low-T, 475–750 K)")
+axs[0, 1].plot(x_axis, 1 - psi_B_profile, color="teal", lw=2, ls="--",
+               label="Rxn B complete (high-T, 750–1100 K)")
+axs[0, 1].plot(x_axis, gamma_profile, color="darkorange", lw=2, ls=":",
+               label="Overall char fraction γ")
 axs[0, 1].set_xlabel("Distance from Hot Wall (mm)")
-axs[0, 1].set_ylabel("Char Fraction (0=Virgin, 1=Char)")
-axs[0, 1].set_title("Final Material Degradation State")
+axs[0, 1].set_ylabel("Reaction Completion / Char Fraction (0→1)")
+axs[0, 1].set_title("Reaction Advancement & Char State")
+axs[0, 1].legend(fontsize=8)
 axs[0, 1].grid(True, ls=":", alpha=0.6)
  
-# 3: Pyrolysis rate
-axs[1, 0].plot(x_axis, rhodot_profile, color="purple", lw=2)
+# Two-reaction pyrolysis rate profiles 
+axs[1, 0].plot(x_axis, rhodot_A_profile, color="steelblue", lw=2,
+               label="Rxn A (low-T)")
+axs[1, 0].plot(x_axis, rhodot_B_profile, color="teal",      lw=2, ls="--",
+               label="Rxn B (high-T)")
+axs[1, 0].plot(x_axis, rhodot_profile,   color="purple",    lw=1.5, ls=":",
+               label="Total")
 axs[1, 0].set_xlabel("Distance from Hot Wall (mm)")
 axs[1, 0].set_ylabel("Pyrolysis Rate (kg/m³-s)")
-axs[1, 0].set_title("Final Volatile Reaction Zone")
+axs[1, 0].set_title("Final Pyrolysis Rate Profiles — Both Reactions")
+axs[1, 0].legend(fontsize=8)
 axs[1, 0].grid(True, ls=":", alpha=0.6)
  
-# 4: Cumulative mass lost
+# Cumulative mass lost 
 axs[1, 1].plot(time_history, mass_lost_history, color="forestgreen", lw=2)
 axs[1, 1].set_xlabel("Time (s)")
 axs[1, 1].set_ylabel("Mass Outflow (kg/m²)")
 axs[1, 1].set_title("Total Outgassing Mass Over Time")
 axs[1, 1].grid(True, ls=":", alpha=0.6)
  
-# 5: Gas flux history
+# Gas flux history
 axs[2, 0].plot(time_history, mdot_history, color="teal", lw=2)
 axs[2, 0].set_xlabel("Time (s)")
 axs[2, 0].set_ylabel("Gas Flux at Surface (kg/m²-s)")
 axs[2, 0].set_title("Boundary-Layer Blowing Mass Flux")
 axs[2, 0].grid(True, ls=":", alpha=0.6)
  
-# 6: Recession depth & rate
+# Recession depth & rate
 ax6 = axs[2, 1]
 ax6.plot(time_history, np.array(recession_history) * 1000, color="black", lw=2)
 ax6.set_xlabel("Time (s)")
@@ -318,6 +411,5 @@ ax6_twin.tick_params(axis="y", labelcolor="royalblue")
 ax6.set_title("Surface Ablation History")
  
 plt.tight_layout()
-fig.subplots_adjust(hspace=0.45, wspace=0.30, top=0.91, bottom=0.05)
+fig.subplots_adjust(hspace=0.45, wspace=0.32, top=0.91, bottom=0.05)
 plt.show()
- 
