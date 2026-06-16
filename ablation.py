@@ -8,7 +8,7 @@ rho_virgin = 1.38e3       #kg/m^3,
 rho_char   = 800          #kg/m^3,
 burn_time  = 8            #seconds
 delta_h_pyro     = 2.3e6  #J/kg, Goldstein phenolic resin decomposition enthalpy
-B_prime_c = 0.08          #Dimensionless thermochemical ablation potential.
+B_prime_c = 0.486          #Dimensionless thermochemical ablation potential.
 
 #Temperature-Dependent Thermal Properties (Grade CE Canvas Phenolic) 
 
@@ -29,7 +29,7 @@ cp_c_T   = np.array([700, 900, 1100, 1400, 1700, 2000, 2500])
 cp_c_val = np.array([900, 980, 1060, 1190, 1340, 1490, 1700])
 
 #Cp of the pyrolysis Gas
-cp_g_T = np.array([300,400,500,600,700,800,900,1000,1100,1200,1400,1600,1800,2000,2200,2400])
+cp_g_T = np.array([300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1400, 1600, 1800, 2000, 2200, 2400])
 cp_g_val = np.array([1249, 1403, 1550, 1679, 1786, 1881, 1968, 2055, 2127, 2192, 2299, 2371, 2411, 2438, 2465, 2492])
 
 #Two Reaction Goldstein Mass Fractions
@@ -59,7 +59,7 @@ R   = 8.314    # J/mol-K
 L_initial = 0.0127 #m (0.5 inches)
 L_current = L_initial
 N = 300
-dt = 0.0005
+dt = 0.00025
 time_steps = int(burn_time / dt)
 
 #Boundary Layer Data (Grabbed from RPA)
@@ -68,7 +68,8 @@ q_rad = 449.8813 * 1000 #W/m^2
 T_gas = 2494 #K, Adiabatic wall temperature...due to boundary layer effects, the temperature responsible for conduction is only a fraction of the total stagnation temperature (RPA)
 
 #Radiation constants
-epsilon = 0.85 #emissivity of carbonaceous char surface (published range 0.80–0.95)
+epsilon_virgin = 0.82
+epsilon_char = 0.93 #emissivity of carbonaceous char surface (published range 0.80–0.95)
 sigma = 5.67e-8 #Stefan-Boltzmann constant, W/m^2-K^4
 
 #Setup Simulation Arrays
@@ -176,7 +177,7 @@ for t in range(time_steps):
     #-------Surface Node 0----------
 
     #Get the nodal properties at the inner wall
-    k_surface, cp_surface, alpha_surface = get_nodal_properties(rho_current[0], T_current[0])
+    k_surface, cp_surface, _ = get_nodal_properties(rho_current[0], T_current[0])
     rhodot_surface = rhodot_array[0]
 
     #Thermochemical Recession
@@ -201,8 +202,10 @@ for t in range(time_steps):
 
     #Surface re-radiation term
     # Calculate heat radiating away from the glowing char
-    q_rerad = epsilon * sigma * (T_current[0]**4)
-
+    gamma_surface = np.clip((rho_virgin - rho_current[0]) / (rho_virgin - rho_char), 0.0, 1.0)
+    epsilon_surface = epsilon_virgin + (epsilon_char - epsilon_virgin) * gamma_surface
+    q_rerad = epsilon_surface * sigma * (T_current[0]**4)
+    
     pyro_sink_vol_surface = (delta_h_pyro * abs(rhodot_surface)) #W/m^3, volumetric endothermic sink
     conduction_out_surface = k_surface * (T_current[0] - T_current[1]) / dx_current #W/m^2
 
@@ -262,7 +265,7 @@ for t in range(time_steps):
     #------Node N-1 Outer Wall----------
 
     # Get the nodal properties at the outer wall
-    k_outer, cp_outer, alpha_outer = get_nodal_properties(rho_current[-1], T_current[-1])
+    k_outer, cp_outer, _ = get_nodal_properties(rho_current[-1], T_current[-1])
     rhodot_outer = rhodot_array[-1]
     pyro_sink_vol_outer = (delta_h_pyro * abs(rhodot_outer))
 
@@ -337,7 +340,7 @@ psi_B_profile = rho_B / rho_B0
 fig, axs = plt.subplots(3, 2, figsize=(14, 16))
 fig.suptitle(
     "Engine Genesis — 1-D Transient Ablation Dashboard (8 s Burn)\n"
-    "Two-Reaction Goldstein Pyrolysis Model",
+    "Two-Reaction Pyrolysis Model",
     fontsize=14, fontweight="bold", y=0.97,
 )
  
