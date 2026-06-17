@@ -1,14 +1,19 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-#Author: Luke Tocco
+"""
+This file contains the main ablation model for simulating the pyrolysis and conduction of heat through the phenolic material. 
+
+#Created by: Luke Tocco
+
+"""
 
 #Material Constants (Grade CE Canvas Phenolic)
 rho_virgin = 1.38e3       #kg/m^3,
 rho_char   = 800          #kg/m^3,
 burn_time  = 8            #seconds
 delta_h_pyro     = 2.3e6  #J/kg, Goldstein phenolic resin decomposition enthalpy
-B_prime_c = 0.486          #Dimensionless thermochemical ablation potential.
+B_prime_c = 0.486          #Dimensionless thermochemical ablation potential
 
 #Temperature-Dependent Thermal Properties (Grade CE Canvas Phenolic) 
 
@@ -52,7 +57,6 @@ m_A = 2
 B_B = 4.48e9   # s⁻¹
 E_B = 1.26e5   # J/mol
 m_B = 2        
- 
 R   = 8.314    # J/mol-K
 
 #1D Geometry and Time Parameters Setup
@@ -181,7 +185,7 @@ for t in range(time_steps):
     rhodot_surface = rhodot_array[0]
 
     #Thermochemical Recession
-    #Calculate how much char mass is oxidized into gas
+    #Calculate how much char mass is oxidized into gas. This is what actually causes the recession.
 
     mdot_char_oxidation = (hg_unblown / cp_g(T_current[0])) * B_prime_c
     recession_rate_surface = mdot_char_oxidation / rho_char
@@ -189,7 +193,6 @@ for t in range(time_steps):
 
     #Add the oxidized char mass to the toal gass blowing into the boundary layer
     mdot_total += mdot_char_oxidation #We add this to the mdot total because the carbon turning into gas adds mass to the boundary layer and improves the blowing correction!
-
 
     #Calculate the blowing parameter Bc
     Bc = (mdot_total * cp_g(T_current[0])) / hg_unblown

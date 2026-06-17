@@ -1,13 +1,14 @@
 """
 ablation_animation.py  -  Engine Genesis: Wall Ablation Visualiser
-======================================================================
+
 Usage:
   python ablation_animation.py             -> interactive window
   python ablation_animation.py --save      -> 60fps MP4 to OUTPUT_PATH
-"""
 
 # THIS FILE WAS WRITTEN BY CLAUDE CODE, LPTOC's PHYSICS WAS PASSED INTO THE MODEL AND TOLD TO CREATE A VISUALISATION OF THE SIMULATION RESULTS. 
 # THE SIMULATION CODE ITSELF IS IN ABLATION.PY
+
+"""
 
 import sys, numpy as np, warnings
 warnings.filterwarnings("ignore")
